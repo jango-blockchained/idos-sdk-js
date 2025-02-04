@@ -1,5 +1,8 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
+# build
+dist
+
 # dependencies
 node_modules
 .pnp
@@ -29,6 +32,17 @@ yarn-error.log*
 # vercel
 .vercel
 
+# vite timestamped configs
+vite.config.ts.timestamp-*
+
 # IDE
 .vscode
 .idea
+.zed
+
+# Playwright
+playwright-report
+test-results
+
+# Synpress
+.cache-synpress

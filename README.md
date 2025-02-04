@@ -7,13 +7,16 @@
 | **[`📁 idos-sdk-js`](./packages/idos-sdk-js/)**        | Source and docs for the idOS JavaScript SDK                                                           |
 | [`📁 idos-enclave`](./apps/idos-enclave)               | Source for the idOS Enclave hosted at [enclave.idos.network](https://enclave.idos.network)            |
 | [`📁 idos-data-dashboard`](./apps/idos-data-dashboard) | Source for the idOS data dashboard hosted at [dashboard.idos.network](https://dashboard.idos.network) |
-| [`📁 idos-example-dapp`](./apps/idos-example-dapp)     | A sample dapp demonstrating SDK usage.                                                                |
+| [`📁 idos-example-dapp`](./examples/idos-example-dapp) | A sample dapp demonstrating SDK usage.                                                                |
 
 ## Installation
 
-Get [our NPM package](https://www.npmjs.com/package/@idos-network/idos-sdk) with `pnpm add @idos-network/idos-sdk` (or the equivalent of your package manager of choice).
+Get [our NPM package](https://www.npmjs.com/package/@idos-network/idos-sdk) and its dependencies with pnpm or the equivalent of your package manager of choice:
+```
+pnpm add @idos-network/idos-sdk ethers near-api-js
+```
 
-## Quickstart
+## 10,000 foot view
 
 ```js
 import { idOS } from "@idos-network/idos-sdk";
@@ -23,11 +26,18 @@ const provider = new ethers.BrowserProvider(window.ethereum);
 await provider.send("eth_requestAccounts", []);
 const signer = await provider.getSigner();
 
-// Initialize SDK
-const idos = await idOS.init({ container: "#idos-container" });
+// Initialize the SDK
+const idos = await idOS.init({enclaveOptions: {container: "#idos-container"}});
 await idos.setSigner("EVM", signer);
 
 // Overview of user's credentials
-await idos.data.list("credentials").then(console.log);
+const credentials = await idos.data.list("credentials");
+console.log(credentials);
 // [{ id: "4f4d...", issuer: "Fractal ID", type: "KYC"}, ...]
 ```
+
+More details on https://github.com/idos-network/idos-sdk-js/blob/main/packages/idos-sdk-js#quickstart
+
+## Support
+
+Please follow the process outlined here: https://github.com/idos-network/.github/blob/main/profile/README.md

@@ -1,75 +1,80 @@
 {
   "name": "@idos-network/idos-sdk",
   "description": "idOS JavaScript SDK",
-  "version": "0.0.29",
+  "version": "0.4.1",
   "homepage": "https://idos.network",
   "repository": "https://github.com/idos-network/idos-sdk-js",
   "license": "MIT",
   "type": "module",
-  "main": "dist/idos-sdk.js",
-  "module": "dist/idos-sdk.umd.cjs",
-  "types": "dist/idos-sdk.d.ts",
-  "files": [
-    "dist"
-  ],
+  "main": "src/lib/index.ts",
+  "files": ["dist"],
   "exports": {
     ".": {
-      "import": "./dist/idos-sdk.js",
-      "require": "./dist/idos-sdk.umd.cjs",
-      "types": "./dist/idos-sdk.d.ts"
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
     }
   },
   "scripts": {
-    "dev": "vite build --watch",
-    "build": "vite build",
-    "lint": "eslint src --ext ts,js --report-unused-disable-directives --max-warnings 0 --cache",
-    "format": "prettier --write .",
+    "dev": "dotenvx run --convention=nextjs -- tsup --watch",
+    "build": "export NODE_ENV=production && dotenvx run --convention=nextjs -- tsup",
+    "lint": "biome check --apply ./src",
+    "format": "biome format --write .",
     "test": "vitest run",
     "test:ui": "vitest --ui",
     "test:watch": "vitest",
     "release-it": "release-it",
     "prepack": "clean-package",
-    "postpack": "clean-package restore"
+    "postpack": "clean-package restore",
+    "test:build": "publint --strict"
+  },
+  "peerDependencies": {
+    "ethers": "^6.12",
+    "near-api-js": "3.0.4"
+  },
+  "peerDependenciesMeta": {
+    "ethers": {
+      "optional": true
+    },
+    "near-api-js": {
+      "optional": true
+    }
   },
   "devDependencies": {
-    "@near-wallet-selector/core": "^8.7.0",
+    "@dotenvx/dotenvx": "^1.6.4",
+    "@idos-network/codecs": "workspace:*",
+    "@idos-network/idos-sdk-types": "workspace:*",
+    "@near-js/types": "^0.2.1",
+    "@near-wallet-selector/core": "8.9.10",
     "@release-it/keep-a-changelog": "^5.0.0",
     "@vitest/ui": "^0.34.6",
     "clean-package": "^2.2.0",
-    "eslint": "^8.52.0",
+    "dotenv": "^16.4.5",
     "jsdom": "^22.1.0",
     "prettier": "^3.0.3",
     "release-it": "^17.0.0",
+    "tsup": "8.0.2",
     "typescript": "^5.2.2",
-    "vite": "^4.5.0",
-    "vite-plugin-dts": "^3.6.3",
     "vitest": "^0.31.4"
   },
   "dependencies": {
     "@digitalbazaar/ed25519-signature-2020": "^5.2.0",
     "@digitalbazaar/ed25519-verification-key-2020": "^4.1.0",
     "@digitalbazaar/vc": "^6.0.2",
-    "@kwilteam/kwil-js": "0.3.0",
-    "@stablelib/base64": "^1.0.1",
-    "@stablelib/binary": "^1.0.1",
-    "@stablelib/bytes": "^1.0.1",
-    "@stablelib/utf8": "^1.0.1",
-    "borsh": "^1.0.0",
-    "ethers": "^6.8.0",
+    "@kwilteam/kwil-js": "0.7.1",
+    "es-toolkit": "^1.23.0",
+    "bs58": "^6.0.0",
     "jsonld": "^8.3.1",
     "jsonld-document-loader": "^2.0.0",
-    "near-api-js": "^2.1.4"
+    "tweetnacl": "^1.0.3"
   },
   "clean-package": {
     "replace": {
-      "main": "dist/idos-sdk.js",
-      "module": "dist/idos-sdk.umd.cjs",
-      "types": "dist/idos-sdk.d.ts",
+      "main": "dist/index.js",
+      "types": "dist/index.d.ts",
       "exports": {
         ".": {
-          "types": "./dist/idos-sdk.d.ts",
-          "import": "./dist/idos-sdk.js",
-          "require": "./dist/idos-sdk.umd.cjs"
+          "types": "./dist/index.d.ts",
+          "import": "./dist/index.js"
         },
         "./package.json": "./package.json"
       }

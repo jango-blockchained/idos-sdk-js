@@ -1,236 +1,176 @@
-import { AddProofOfPersonhood } from "#/lib/components/add-proof-of-personhood";
-import { Breadcrumbs } from "#/lib/components/breadcrumbs";
-import { Title } from "#/lib/components/title";
-import { TitleBar } from "#/lib/components/title-bar";
-import { useFetchCurrentUser } from "#/lib/queries";
-import { addressAtom } from "#/lib/state";
 import {
-  AbsoluteCenter,
-  Box,
-  Button,
-  Flex,
+  HStack,
+  Heading,
   IconButton,
-  Spinner,
-  Stack,
-  Text,
-  useDisclosure
+  List,
+  ListItem,
+  VStack,
+  useDisclosure,
 } from "@chakra-ui/react";
-import { useAtomValue } from "jotai";
-import { PlusIcon } from "lucide-react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { RotateCw } from "lucide-react";
 import { useState } from "react";
-import { isMobile } from "react-device-detect";
-import { AddCredentialCard } from "./components/add-credential-card";
+import { useAccount, useSwitchChain } from "wagmi";
+
+import { DataError } from "@/components/data-error";
+import { DataLoading } from "@/components/data-loading";
+import { NoData } from "@/components/no-data";
+import { useIdOS } from "@/core/idos";
+import { sepolia } from "wagmi/chains";
 import { CredentialCard } from "./components/credential-card";
-import { CredentialViewer } from "./components/credential-viewer";
+import { CredentialDetails } from "./components/credential-details";
 import { DeleteCredential } from "./components/delete-credential";
-import { MobileAlert } from "./components/mobile-alert";
-import { Credential, useFetchCredentials } from "./queries";
+import { GrantsCenter } from "./components/grants-center";
+import type { idOSCredentialWithShares } from "./types";
 
-export function Component() {
-  const {
-    isOpen: isAddProofOpen,
-    onOpen: onAddProofOpen,
-    onClose: onAddProofClose
-  } = useDisclosure();
+const useFetchCredentials = () => {
+  const { sdk } = useIdOS();
 
-  const {
-    isOpen: isViewCredentialOpen,
-    onOpen: onCredentialViewerOpen,
-    onClose: onCredentialViewerClose
-  } = useDisclosure();
-
-  const {
-    isOpen: isCredentialDeleteOpen,
-    onOpen: onCredentialDeleteOpen,
-    onClose: onCredentialDeleteClose
-  } = useDisclosure();
-
-  const {
-    isOpen: isMobileAlertOpen,
-    onOpen: onMobileAlertOpen,
-    onClose: onMobileAlertClose
-  } = useDisclosure();
-
-  const address = useAtomValue(addressAtom);
-  const credentials = useFetchCredentials({
-    enabled: !!address
+  return useQuery({
+    queryKey: ["credentials"],
+    queryFn: async () => {
+      const credentials = await sdk.data.listAllCredentials();
+      return credentials.map((credential) => ({
+        ...credential,
+        shares: credentials
+          .filter((_credential) => _credential.original_id === credential.id)
+          .map((c) => c.id),
+      })) as idOSCredentialWithShares[]; // @todo: remove once we have more type safety in the SDK.
+    },
+    select: (credentials) =>
+      credentials.filter((credential) => !credential.original_id && !!credential.public_notes),
   });
-  const [credential, setCredential] = useState<Credential | undefined>();
-  const currentUser = useFetchCurrentUser();
+};
 
-  const handleOpenCredentialViewer = (credential: Credential) => {
-    if (isMobile) {
-      onMobileAlertOpen();
-      return;
-    }
-    setCredential(credential);
-    onCredentialViewerOpen();
+const NoCredentials = () => {
+  return (
+    <NoData
+      title="You have 0 credentials added."
+      subtitle="Create your first credential and store it on the idOS."
+      cta="Add a credential"
+    />
+  );
+};
+
+const Credentials = () => {
+  const credentials = useFetchCredentials();
+  const [credentialDetailsId, setCredentialDetalsId] = useState<string | null>(null);
+  const [credentialGrantsId, setCredentialGrantsId] = useState<string | null>(null);
+  const [credentialToDelete, setCredentialToDelete] = useState<idOSCredentialWithShares | null>(
+    null,
+  );
+  const { isOpen, onOpen, onClose } = useDisclosure();
+  const { chain } = useAccount();
+  const { switchChainAsync } = useSwitchChain();
+
+  const handleManageGrants = async (credentialId: string) => {
+    if (chain?.id !== sepolia.id)
+      await switchChainAsync?.({
+        chainId: sepolia.id,
+      });
+    setCredentialGrantsId(credentialId);
   };
 
-  const handleCloseCredentialViewer = () => {
-    setCredential(undefined);
-    onCredentialViewerClose();
+  const handleDelete = async (credential: idOSCredentialWithShares) => {
+    if (chain?.id !== sepolia.id)
+      await switchChainAsync?.({
+        chainId: sepolia.id,
+      });
+    setCredentialToDelete(credential);
+    onOpen();
   };
 
-  const onAddCredential = () => {
-    onAddProofOpen();
+  const handleClose = () => {
+    setCredentialToDelete(null);
+    onClose();
   };
 
-  const handleDeleteCredential = (credential: Credential) => {
-    setCredential(credential);
-    onCredentialDeleteOpen();
-  };
-
-  const handleDeleteCredentialClose = () => {
-    setCredential(undefined);
-    onCredentialDeleteClose();
-  };
-
-  const handleAddCredential = () => {
-    if (isMobile) {
-      onMobileAlertOpen();
-      return;
-    }
-
-    onAddProofOpen();
-  };
-
-  if (!currentUser.data || credentials.data?.length === 0) {
-    return (
-      <Stack flex={1} gap={2.5} ml={[0, 0, 0, 380]}>
-        <Flex align="center" justify="space-between" h={[82, 125]}>
-          <Breadcrumbs items={["Dashboard", "Credentials"]} />
-        </Flex>
-        <Flex align="center" gap={2.5}>
-          <TitleBar>
-            <Title>Credentials</Title>
-
-            <Text>
-              0
-              <Text as="span" mx={1} hideBelow="xl">
-                Connected Credentials
-              </Text>
-            </Text>
-          </TitleBar>
-          <IconButton
-            w="60px"
-            h="60px"
-            p={0}
-            aria-label="Add wallet"
-            colorScheme="green"
-            hideFrom="lg"
-            onClick={handleAddCredential}
-            size="xl"
-          >
-            <PlusIcon size={24} />
-          </IconButton>
-          <Button
-            colorScheme="green"
-            hideBelow="lg"
-            leftIcon={<PlusIcon size={24} />}
-            onClick={handleAddCredential}
-            size="xl"
-          >
-            Add credential
-          </Button>
-        </Flex>
-
-        <AddCredentialCard onAddCredential={handleAddCredential} />
-        <AddProofOfPersonhood
-          isOpen={isAddProofOpen}
-          onClose={onAddProofClose}
-        />
-        <MobileAlert
-          isOpen={isMobileAlertOpen}
-          onClose={onMobileAlertClose}
-          content="Please use the idOS Dashboard in your desktop's browser to create new idOS credentials"
-        />
-      </Stack>
-    );
+  if (credentials.isFetching) {
+    return <DataLoading />;
   }
 
+  if (credentials.isError) {
+    return <DataError onRetry={credentials.refetch} />;
+  }
+
+  if (credentials.isSuccess) {
+    return (
+      <>
+        <List id="credentials-list" display="flex" flexDir="column" gap={2.5} flex={1}>
+          {credentials.data.map((credential) => (
+            <ListItem key={credential.id} id={credential.id}>
+              <CredentialCard
+                credential={credential}
+                onViewDetails={setCredentialDetalsId}
+                onManageGrants={handleManageGrants}
+                onDelete={handleDelete}
+              />
+            </ListItem>
+          ))}
+        </List>
+        {credentialDetailsId ? (
+          <CredentialDetails
+            credentialId={credentialDetailsId}
+            isOpen={!!credentialDetailsId}
+            onClose={() => setCredentialDetalsId(null)}
+          />
+        ) : null}
+
+        {credentialGrantsId ? (
+          <GrantsCenter
+            credentialId={credentialGrantsId}
+            isOpen={!!credentialGrantsId}
+            onClose={() => {
+              setCredentialGrantsId(null);
+            }}
+          />
+        ) : null}
+
+        {credentialToDelete ? (
+          <DeleteCredential credential={credentialToDelete} isOpen={isOpen} onClose={handleClose} />
+        ) : null}
+      </>
+    );
+  }
+};
+
+export function Component() {
+  const { hasProfile } = useIdOS();
+  const queryClient = useQueryClient();
+
   return (
-    <Box>
-      <Stack flex={1} gap={2.5} ml={[0, 0, 0, 380]}>
-        <Flex align="center" justify="space-between" h={[82, 125]}>
-          <Breadcrumbs items={["Dashboard", "Credentials"]} />
-        </Flex>
-        <Flex align="center" gap={2.5}>
-          <TitleBar>
-            <Title>Credentials</Title>
-            {currentUser.isFetching || credentials.isFetching ? (
-              <Spinner size="sm" />
-            ) : (
-              <Text>
-                {credentials.data?.length || 0}
-                <Text as="span" mx={1} hideBelow="xl">
-                  Connected Credentials
-                </Text>
-              </Text>
-            )}
-          </TitleBar>
-          {credentials.isSuccess && !credentials.data ? (
-            <Button
-              colorScheme="green"
-              hideBelow="lg"
-              leftIcon={<PlusIcon size={24} />}
-              onClick={onAddCredential}
-              size="xl"
-            >
-              Add credential
-            </Button>
-          ) : null}
-        </Flex>
-
-        <Box>
-          {credentials.isFetching || currentUser.isFetching ? (
-            <AbsoluteCenter>
-              <Spinner />
-            </AbsoluteCenter>
-          ) : null}
-
-          {credentials.isSuccess ? (
-            <>
-              {!credentials.data ? (
-                <AddCredentialCard onAddCredential={handleAddCredential} />
-              ) : (
-                credentials.data.map((credential) => (
-                  <CredentialCard
-                    key={credential.id}
-                    credential={credential}
-                    onViewDetails={handleOpenCredentialViewer}
-                    onDelete={handleDeleteCredential}
-                  />
-                ))
-              )}
-            </>
-          ) : null}
-        </Box>
-      </Stack>
-      <AddProofOfPersonhood isOpen={isAddProofOpen} onClose={onAddProofClose} />
-      {credential ? (
-        <>
-          <CredentialViewer
-            credential={credential}
-            isOpen={isViewCredentialOpen}
-            onClose={handleCloseCredentialViewer}
-          />
-          <DeleteCredential
-            isOpen={isCredentialDeleteOpen}
-            credential={credential}
-            onClose={handleDeleteCredentialClose}
-          />
-        </>
-      ) : null}
-
-      <MobileAlert
-        isOpen={isMobileAlertOpen}
-        onClose={onMobileAlertClose}
-        content="Please use the idOS Dashboard in your desktop's browser to see
-              your credential's content"
-      />
-    </Box>
+    <VStack align="stretch" flex={1} gap={2.5}>
+      <HStack
+        justifyContent="space-between"
+        h={{
+          base: 14,
+          lg: 20,
+        }}
+        p={5}
+        bg="neutral.900"
+        rounded="xl"
+      >
+        <Heading
+          as="h1"
+          fontSize={{
+            base: "x-large",
+            lg: "xx-large",
+          }}
+        >
+          Credentials
+        </Heading>
+        <IconButton
+          aria-label="Refresh credentials"
+          icon={<RotateCw size={18} />}
+          onClick={() => {
+            queryClient.refetchQueries({
+              queryKey: ["credentials"],
+            });
+          }}
+        />
+      </HStack>
+      {hasProfile ? <Credentials /> : <NoCredentials />}
+    </VStack>
   );
 }
-
-Component.displayname = "DashboardCredentials";
+Component.displayName = "Credentials";

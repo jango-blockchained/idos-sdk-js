@@ -1,106 +1,189 @@
-import { Utils as KwilUtils, WebKwil } from "@kwilteam/kwil-js";
-import type { SignerSupplier } from "@kwilteam/kwil-js/dist/core/builders.d";
-import { Signer } from "ethers";
+import type { idOSUser, idOSUserAttribute, idOSWallet } from "@idos-network/idos-sdk-types";
+import { KwilSigner, Utils as KwilUtils, WebKwil } from "@kwilteam/kwil-js";
+import type { ActionBody, ActionInput } from "@kwilteam/kwil-js/dist/core/action";
+import type { CustomSigner, EthSigner } from "@kwilteam/kwil-js/dist/core/builders.d";
+import idOSGrant, { DEFAULT_RECORDS_PER_PAGE } from "./grants/grant";
 
 export class KwilWrapper {
-  dbId: string;
-  kwilProvider: string;
-  client: WebKwil;
-  signer?: Signer | ((message: Uint8Array) => Promise<Uint8Array>);
-  publicKey?: string;
-  signatureType?: string;
+  static defaults = {
+    kwilProvider: import.meta.env.VITE_IDOS_NODE_URL,
+    chainId: import.meta.env.VITE_IDOS_NODE_KWIL_CHAIN_ID,
+    dbId: import.meta.env.VITE_IDOS_NODE_KWIL_DB_ID,
+  };
 
-  constructor({
-    nodeUrl: kwilProvider = import.meta.env.VITE_IDOS_NODE_URL,
-    chainId = import.meta.env.VITE_IDOS_NODE_KWIL_CHAIN_ID,
-    dbId = import.meta.env.VITE_IDOS_NODE_KWIL_DB_ID,
-  }) {
-    this.dbId = dbId;
+  client: WebKwil;
+  kwilProvider: string;
+  dbId: string;
+  signer?: KwilSigner;
+
+  constructor(
+    client: WebKwil,
+    kwilProvider: string = KwilWrapper.defaults.kwilProvider,
+    dbId: string = KwilWrapper.defaults.dbId,
+  ) {
+    this.client = client;
     this.kwilProvider = kwilProvider;
-    this.client = new WebKwil({ kwilProvider, chainId });
+    this.dbId = dbId;
+  }
+
+  static async init({
+    nodeUrl = KwilWrapper.defaults.kwilProvider,
+    dbId = KwilWrapper.defaults.dbId,
+  }): Promise<KwilWrapper> {
+    const kwil = new WebKwil({ kwilProvider: nodeUrl, chainId: "" });
+    const chainId =
+      (await kwil.chainInfo({ disableWarning: true })).data?.chain_id ??
+      KwilWrapper.defaults.chainId;
+
+    // This assumes that nobody else created a db named "idos".
+    // Given we intend to not let db creation open, that's a safe enough assumption.
+    if (dbId === KwilWrapper.defaults.dbId) {
+      dbId =
+        (await kwil.listDatabases()).data?.filter(({ name }) => name === "idos")[0].dbid ?? dbId;
+    }
+
+    return new KwilWrapper(new WebKwil({ kwilProvider: nodeUrl, chainId }), nodeUrl, dbId);
   }
 
   get schema() {
     return this.client.getSchema(this.dbId);
   }
 
-  setSigner({
+  async setSigner({
+    accountId,
     signer,
-    publicKey,
     signatureType,
   }: {
-    signer: Signer | ((message: Uint8Array) => Promise<Uint8Array>);
-    publicKey: string;
+    accountId: string;
+    signer: EthSigner | CustomSigner;
     signatureType: string;
   }) {
-    this.signer = signer;
-    this.publicKey = publicKey;
-    this.signatureType = signatureType;
+    if (signatureType === "nep413") {
+      this.signer = new KwilSigner(signer as CustomSigner, accountId, signatureType);
+    } else {
+      this.signer = new KwilSigner(signer as EthSigner, accountId);
+    }
   }
 
   async buildAction(
     actionName: string,
-    inputs: Record<string, any> | null,
+    // biome-ignore lint/suspicious/noExplicitAny: TBD
+    inputs: Record<string, any>[] | null | any,
     description?: string,
-    useSigner: boolean = true
   ) {
-    const action = this.client.actionBuilder().dbid(this.dbId).name(actionName);
+    const payload: ActionBody = {
+      name: actionName,
+      dbid: this.dbId,
+      inputs: [],
+    };
 
     if (description) {
-      action.description(`*${description}*`);
-    }
-
-    if (useSigner) {
-      if (!this.publicKey || !this.signer || !this.signatureType) throw new Error("Call idOS.setSigner first.");
-
-      action.publicKey(this.publicKey).signer(
-        this.signer as SignerSupplier, // TODO: pkoch knows the types line up enough (i.e., it runs just fine as is), but he didn't find a way to express that in types.
-        this.signatureType
-      );
+      payload.description = `*${description}*`;
     }
 
     if (inputs) {
-      const actionInput = new KwilUtils.ActionInput();
-
-      for (const key in inputs) {
-        actionInput.put(`$${key}`, inputs[key]);
+      for (const input of inputs) {
+        if (!input || (input && Object.keys(input).length === 0)) {
+          continue;
+        }
+        const actionInput = new KwilUtils.ActionInput();
+        for (const key in input) {
+          actionInput.put(`$${key}`, input[key]);
+        }
+        payload.inputs = [...(payload.inputs as ActionInput[]), actionInput];
       }
-      action.concat(actionInput);
     }
 
-    return action;
+    return payload;
   }
 
   async call(
     actionName: string,
+    // biome-ignore lint/suspicious/noExplicitAny: TBD
     actionInputs: Record<string, any> | null,
     description?: string,
-    useSigner: boolean = true
+    useSigner = true,
   ) {
-    const action = await this.buildAction(actionName, actionInputs, description, useSigner);
-    const msg = await action.buildMsg();
-    const res = await this.client.call(msg);
+    if (useSigner && !this.signer) throw new Error("Call idOS.setSigner first.");
 
-    return res.data!.result;
+    const action = await this.buildAction(actionName, [actionInputs], description);
+
+    const res = await this.client.call(action, useSigner ? this.signer : undefined);
+
+    return res.data?.result;
   }
 
-  async broadcast(actionName: string, actionInputs: Record<string, any>, description?: string) {
+  async execute(
+    actionName: string,
+    actionInputs: Record<string, unknown>[],
+    description?: string,
+    synchronous = true,
+  ) {
+    if (!this.signer) throw new Error("No signer set");
+
     const action = await this.buildAction(actionName, actionInputs, description);
-    const tx = await action.buildTx();
-    const res = await this.client.broadcast(tx);
-
-    return res.data!.tx_hash;
+    const res = await this.client.execute(action, this.signer, synchronous);
+    return res.data?.tx_hash;
   }
 
-  async getHumanId(): Promise<string | null> {
-    const result = (await this.call("get_wallet_human_id", {}, "See your idOS profile ID")) as any;
-
-    return result[0]?.human_id;
+  async getUserProfile(): Promise<idOSUser> {
+    const [user] = (await this.call("get_user", null)) as unknown as [idOSUser];
+    return user;
   }
 
-  async hasProfile(address: string): Promise<boolean> {
-    const result = (await this.call("has_profile", { address }, undefined, false)) as any;
+  async hasProfile(userAddress: string): Promise<boolean> {
+    const result = (await this.call(
+      "has_profile",
+      { address: userAddress },
+      undefined,
+      false,
+      // biome-ignore lint/suspicious/noExplicitAny: TBD
+    )) as any;
 
     return !!result[0]?.has_profile;
+  }
+
+  async getGrantsGrantedCount(): Promise<number> {
+    const response = (await this.call("get_access_grants_granted_count", null)) as unknown as {
+      count: number;
+    }[];
+    return response[0].count;
+  }
+
+  async getGrantsGranted(
+    page: number,
+    size = DEFAULT_RECORDS_PER_PAGE,
+  ): Promise<{ grants: idOSGrant[]; totalCount: number }> {
+    if (!page) throw new Error("paging starts from 1");
+    const list = (await this.call("get_access_grants_granted", { page, size })) as any;
+    const totalCount = await this.getGrantsGrantedCount();
+
+    const grants = list.map(
+      (grant: any) =>
+        new idOSGrant({
+          id: grant.id,
+          ownerUserId: grant.ag_owner_user_id,
+          granteeAddress: grant.ag_grantee_wallet_identifier,
+          dataId: grant.data_id,
+          lockedUntil: grant.locked_until,
+        }),
+    );
+    return {
+      grants,
+      totalCount,
+    };
+  }
+
+  async getLitAttrs() {
+    const attrs = (await this.call("get_attributes", null)) as unknown as idOSUserAttribute[];
+    return attrs.filter((attr) => attr.attribute_key.startsWith("lit-"));
+  }
+
+  async getUserWallets() {
+    return (await this.call("get_wallets", null)) as unknown as idOSWallet[];
+  }
+  async getEvmUserWallets() {
+    const userWallets = (await this.getUserWallets()) as unknown as idOSWallet[];
+    return userWallets.filter((wallet) => wallet.wallet_type === "EVM");
   }
 }

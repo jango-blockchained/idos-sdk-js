@@ -1,38 +1,66 @@
-import { EnclaveProvider, StoredData } from "./enclave-provider";
+import { base64Encode } from "@idos-network/codecs";
+import type { idOSCredential } from "@idos-network/idos-sdk-types";
 
-export class IframeEnclave extends EnclaveProvider {
-  hostUrl = new URL(import.meta.env.VITE_IDOS_ENCLAVE_URL);
+import type { BackupPasswordInfo } from "../types";
+import type {
+  DiscoverUserEncryptionPublicKeyResponse,
+  EnclaveOptions,
+  EnclaveProvider,
+  StoredData,
+} from "./types";
 
+export class IframeEnclave implements EnclaveProvider {
+  options: Omit<EnclaveOptions, "container" | "url">;
   container: string;
   iframe: HTMLIFrameElement;
-  usePasskeys?: string;
+  hostUrl: URL;
 
-  constructor(options: { container: string; usePasskeys?: boolean }) {
-    super();
-    this.container = options.container;
+  constructor(options: EnclaveOptions) {
+    const { container, ...other } = options;
+    this.container = container;
+    this.options = other;
+    this.hostUrl = new URL(other.url ?? import.meta.env.VITE_IDOS_ENCLAVE_URL);
     this.iframe = document.createElement("iframe");
-    this.usePasskeys = options.usePasskeys ? "webauthn" : undefined;
+    this.iframe.id = "idos-enclave-iframe";
   }
 
   async load(): Promise<StoredData> {
     await this.#loadEnclave();
 
+    await this.#requestToEnclave({ configure: this.options });
+
     return (await this.#requestToEnclave({ storage: {} })) as StoredData;
   }
 
-  async init(humanId?: string, signerAddress?: string, signerPublicKey?: string): Promise<Uint8Array> {
-    let { encryptionPublicKey } = (await this.#requestToEnclave({
-      storage: { humanId, signerAddress, signerPublicKey },
-    })) as { encryptionPublicKey: Uint8Array };
+  async ready(
+    userId?: string,
+    signerAddress?: string,
+    signerPublicKey?: string,
+    expectedUserEncryptionPublicKey?: string,
+  ): Promise<Uint8Array> {
+    let { encryptionPublicKey: userEncryptionPublicKey } = (await this.#requestToEnclave({
+      storage: {
+        userId,
+        signerAddress,
+        signerPublicKey,
+        expectedUserEncryptionPublicKey,
+      },
+    })) as StoredData;
 
-    if (encryptionPublicKey) return encryptionPublicKey;
+    while (!userEncryptionPublicKey) {
+      this.#showEnclave();
+      try {
+        userEncryptionPublicKey = (await this.#requestToEnclave({
+          keys: {},
+        })) as Uint8Array;
+      } catch (e) {
+        if (this.options.throwOnUserCancelUnlock) throw e;
+      } finally {
+        this.#hideEnclave();
+      }
+    }
 
-    this.#showEnclave();
-
-    return this.#requestToEnclave({ keys: { usePasskeys: this.usePasskeys } }).then((encryptionPublicKey) => {
-      this.#hideEnclave();
-      return encryptionPublicKey as Uint8Array;
-    });
+    return userEncryptionPublicKey;
   }
 
   async store(key: string, value: string): Promise<string> {
@@ -41,6 +69,10 @@ export class IframeEnclave extends EnclaveProvider {
 
   async reset(): Promise<void> {
     this.#requestToEnclave({ reset: {} });
+  }
+
+  async updateStore(key: string, value: unknown): Promise<void> {
+    await this.#requestToEnclave({ updateStore: { key, value } });
   }
 
   async confirm(message: string): Promise<boolean> {
@@ -52,15 +84,41 @@ export class IframeEnclave extends EnclaveProvider {
     });
   }
 
-  async encrypt(message: Uint8Array, receiverPublicKey: Uint8Array): Promise<Uint8Array> {
-    return this.#requestToEnclave({ encrypt: { message, receiverPublicKey } }) as Promise<Uint8Array>;
+  async encrypt(
+    message: Uint8Array,
+    receiverPublicKey: Uint8Array,
+  ): Promise<{ content: Uint8Array; encryptorPublicKey: Uint8Array }> {
+    return this.#requestToEnclave({
+      encrypt: { message, receiverPublicKey },
+    }) as Promise<{ content: Uint8Array; encryptorPublicKey: Uint8Array }>;
   }
 
   async decrypt(message: Uint8Array, senderPublicKey: Uint8Array): Promise<Uint8Array> {
-    return this.#requestToEnclave({ decrypt: { fullMessage: message, senderPublicKey } }) as Promise<Uint8Array>;
+    return this.#requestToEnclave({
+      decrypt: { fullMessage: message, senderPublicKey },
+    }) as Promise<Uint8Array>;
   }
 
-  async #loadEnclave() {
+  async filterCredentialsByCountries(credentials: Record<string, string>[], countries: string[]) {
+    return this.#requestToEnclave({
+      filterCredentialsByCountries: { credentials, countries },
+    }) as Promise<string[]>;
+  }
+
+  filterCredentials(
+    credentials: Record<string, string>[],
+    privateFieldFilters: { pick: Record<string, string>; omit: Record<string, string> },
+  ): Promise<idOSCredential[]> {
+    return this.#requestToEnclave({
+      filterCredentials: { credentials, privateFieldFilters },
+    }) as Promise<idOSCredential[]>;
+  }
+
+  async #loadEnclave(): Promise<void> {
+    const container =
+      document.querySelector(this.container) ||
+      throwNew(Error, `Can't find container with selector ${this.container}`);
+
     // https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Permissions-Policy#directives
     const permissionsPolicies = ["publickey-credentials-get", "storage-access"];
 
@@ -93,22 +151,36 @@ export class IframeEnclave extends EnclaveProvider {
       this.iframe.style.setProperty(k, v);
     }
 
-    const container = document.querySelector(this.container);
-    if (!container) throw new Error(`Can't find container with selector ${this.container}`);
-
+    let el: HTMLElement | null;
+    // biome-ignore lint/suspicious/noAssignInExpressions: it's on purpose
+    while ((el = document.getElementById(this.iframe.id))) {
+      console.log("reinstalling idOS iframe...");
+      container.removeChild(el);
+    }
     container.appendChild(this.iframe);
 
-    return new Promise((resolve) => this.iframe.addEventListener("load", resolve));
+    return new Promise((resolve) =>
+      this.iframe.addEventListener(
+        "load",
+        () => {
+          resolve();
+        },
+        { once: true },
+      ),
+    );
   }
 
   #showEnclave() {
+    // biome-ignore lint/style/noNonNullAssertion: Make the explosion visible.
     this.iframe.parentElement!.classList.add("visible");
   }
 
   #hideEnclave() {
+    // biome-ignore lint/style/noNonNullAssertion: Make the explosion visible.
     this.iframe.parentElement!.classList.remove("visible");
   }
 
+  // biome-ignore lint/suspicious/noExplicitAny: `any` is fine here. We will type it properly later.
   async #requestToEnclave(request: any) {
     return new Promise((resolve, reject) => {
       const { port1, port2 } = new MessageChannel();
@@ -118,7 +190,70 @@ export class IframeEnclave extends EnclaveProvider {
         data.error ? reject(data.error) : resolve(data.result);
       };
 
+      // biome-ignore lint/style/noNonNullAssertion: Make the explosion visible.
       this.iframe.contentWindow!.postMessage(request, this.hostUrl.origin, [port2]);
     });
   }
+
+  async backupPasswordOrSecret(
+    backupFn: (data: BackupPasswordInfo) => Promise<void>,
+  ): Promise<void> {
+    const abortController = new AbortController();
+    this.#showEnclave();
+
+    window.addEventListener(
+      "message",
+      async (event) => {
+        if (event.data.type !== "idOS:store" || event.origin !== this.hostUrl.origin) return;
+
+        let status = "";
+
+        try {
+          status = "success";
+          await backupFn(event);
+          this.#hideEnclave();
+        } catch (error) {
+          status = "failure";
+          this.#hideEnclave();
+        }
+
+        event.ports[0].postMessage({
+          result: {
+            type: "idOS:store",
+            status,
+          },
+        });
+        event.ports[0].close();
+        abortController.abort();
+      },
+      { signal: abortController.signal },
+    );
+
+    try {
+      await this.#requestToEnclave({
+        backupPasswordOrSecret: {},
+      });
+      this.#hideEnclave();
+    } catch (error) {
+      console.error(error);
+    }
+  }
+
+  async discoverUserEncryptionPublicKey(
+    userId: string,
+  ): Promise<DiscoverUserEncryptionPublicKeyResponse> {
+    if (this.options.mode !== "new")
+      throw new Error("You can only call `discoverUserEncryptionPublicKey` when mode is `new`.");
+
+    const userEncryptionPublicKey = await this.ready(userId);
+
+    return {
+      userId,
+      userEncryptionPublicKey: base64Encode(userEncryptionPublicKey),
+    };
+  }
+}
+
+function throwNew(ErrorClass: ErrorConstructor, ...args: Parameters<ErrorConstructor>): never {
+  throw new ErrorClass(...args);
 }

@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <link
       rel="icon"
-      href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔒</text></svg>"
+      href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>🔐</text></svg>"
     />
 
     <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -14,7 +14,8 @@
       rel="stylesheet"
     />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>idOS Enclave</title>
+    <title>idOS Secure Enclave</title>
+
     <style>
       button {
         display: none;
@@ -32,6 +33,14 @@
         content: "Unlocking...";
       }
 
+      button#unlock.create::before {
+        content: "🔐 Create idOS Key";
+      }
+
+      button#unlock.create:disabled::before {
+        content: "Creating...";
+      }
+
       button#confirm::before {
         content: "👀 See request";
       }
@@ -40,23 +49,39 @@
         background-color: grey;
       }
 
-      button#confirm:disabled::before {
+      button#backup:disabled::before {
+        content: "Waiting...";
+      }
+      button#backup::before {
+        content: "💼 Back up idOS key";
+      }
+
+      button#backup:disabled {
+        background-color: grey;
+      }
+
+      button#backup:disabled::before {
         content: "Waiting...";
       }
     </style>
   </head>
+
   <body>
     <div id="container" class="w-screen h-screen">
       <button
         id="unlock"
-        class="w-full h-full px-[5%] py-[2%] bg-[#00ffb9] text-[43cqmin] transition-colors hover:bg-green-300 rounded-lg text-zinc-950 font-medium"
+        class="h-full w-full rounded-lg bg-[#00ffb9] px-[5%] py-[2%] font-medium text-[41cqmin] text-zinc-950 transition-colors hover:bg-green-300"
       ></button>
       <button
         id="confirm"
-        class="w-full h-full px-[5%] py-[2%] bg-[#00ffb9] text-[43cqmin] transition-colors hover:bg-green-300 rounded-lg text-zinc-950 font-medium"
+        class="h-full w-full rounded-lg bg-[#00ffb9] px-[5%] py-[2%] font-medium text-[41cqmin] text-zinc-950 transition-colors hover:bg-green-300"
+      ></button>
+      <button
+        id="backup"
+        class="h-full w-full whitespace-pre rounded-lg bg-[#00ffb9] px-[5%] py-[2%] font-medium text-[41cqmin] text-zinc-950 transition-colors hover:bg-green-300"
       ></button>
     </div>
 
-    <script type="module" src="/src/main.js"></script>
+    <script type="module" src="/src/main.ts"></script>
   </body>
 </html>

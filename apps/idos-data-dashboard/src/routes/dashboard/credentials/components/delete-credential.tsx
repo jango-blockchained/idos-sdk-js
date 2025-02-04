@@ -1,103 +1,228 @@
+import { useIdOS } from "@/core/idos";
 import {
-  Box,
+  AlertDialog,
+  AlertDialogBody,
+  AlertDialogCloseButton,
+  AlertDialogContent,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogOverlay,
   Button,
-  Flex,
-  Heading,
-  Modal,
-  ModalBody,
-  ModalCloseButton,
-  ModalContent,
-  ModalFooter,
-  ModalHeader,
-  ModalOverlay,
+  Code,
+  Spinner,
   Text,
-  VStack
+  useToast,
 } from "@chakra-ui/react";
+import type { idOSCredential, idOSGrant } from "@idos-network/idos-sdk";
+import {
+  type DefaultError,
+  useMutation,
+  useMutationState,
+  useQueryClient,
+} from "@tanstack/react-query";
+import { useRef } from "react";
 
-import { KeyRoundIcon } from "#/lib/components/icons/key-round.tsx";
-import { useDeleteCredential } from "../mutations";
-import { Credential } from "../queries";
+import { timelockToMs } from "../../utils/time";
+import { useFetchGrants, useRevokeGrants } from "../shared";
 
 type DeleteCredentialProps = {
   isOpen: boolean;
-  credential: Credential;
+  credential: idOSCredential;
   onClose: () => void;
 };
-export const DeleteCredential = (props: DeleteCredentialProps) => {
-  const deleteCredential = useDeleteCredential();
 
-  const handleDelete = async () => {
-    await deleteCredential.mutateAsync({
-      id: props.credential.id
-    });
-    props.onClose();
+type Ctx = { previousCredentials: idOSCredential[] };
+
+const useDeleteCredentialMutation = () => {
+  const { sdk } = useIdOS();
+  const queryClient = useQueryClient();
+
+  return useMutation<{ id: string }, DefaultError, { id: string; credential_type: string }, Ctx>({
+    mutationFn: ({ id, credential_type }) =>
+      sdk.data.delete("credentials", id, `Delete credential ${credential_type} from idOS`, true),
+    async onMutate({ id }) {
+      await queryClient.cancelQueries({ queryKey: ["credentials"] });
+      const previousCredentials = queryClient.getQueryData<idOSCredential[]>(["credentials"]) ?? [];
+
+      queryClient.setQueryData<idOSCredential[]>(["credentials"], (old = []) =>
+        old.filter((cred) => cred.id !== id),
+      );
+
+      return { previousCredentials };
+    },
+    async onError(_, __, ctx) {
+      queryClient.setQueryData(["credentials"], ctx?.previousCredentials);
+    },
+  });
+};
+
+export const DeleteCredential = ({ isOpen, credential, onClose }: DeleteCredentialProps) => {
+  const toast = useToast();
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+  const deleteCredential = useDeleteCredentialMutation();
+  const grants = useFetchGrants({
+    credentialId: credential.id,
+  });
+  const revokeGrants = useRevokeGrants();
+  const hasTimeLock =
+    grants.data?.length &&
+    grants.data?.find((grant) => timelockToMs(grant.lockedUntil) >= Date.now());
+
+  const state = useMutationState({
+    filters: {
+      mutationKey: ["revokeGrant"],
+      status: "pending",
+    },
+    select: (mutation) => mutation.state.variables as idOSGrant,
+  });
+
+  const handleClose = () => {
+    revokeGrants.reset();
+    grants.refetch();
+    onClose();
   };
 
+  const handleRevokeGrants = async () => {
+    if (grants.data && grants.data.length > 0) {
+      toast({
+        title: "Revoking grants",
+        description: "Revoking grants that have been shared with others...",
+        icon: <Spinner size="sm" />,
+        position: "bottom-right",
+        duration: 3000,
+        status: "error",
+      });
+
+      await revokeGrants.mutateAsync(grants.data ?? [], {
+        onSuccess() {
+          toast({
+            title: "Grant revocation successful",
+            description: "All grants have been successfully revoked. Deleting credential...",
+            icon: <Spinner size="sm" />,
+            position: "bottom-right",
+            status: "success",
+          });
+        },
+        onError() {
+          toast({
+            title: "Error while revoking grants",
+            description: "An unexpected error. Please try again.",
+            duration: 3000,
+            position: "bottom-right",
+            status: "error",
+          });
+        },
+      });
+    }
+  };
+
+  const handleDeleteCredential = async () => {
+    if (hasTimeLock) {
+      toast({
+        title: "Error while deleting credential",
+        description:
+          "This credential has a locked grant. You can't delete it until the grant locked until date is passed.",
+        position: "bottom-right",
+        status: "error",
+      });
+      return;
+    }
+    await handleRevokeGrants();
+    await deleteCredential.mutateAsync(
+      { id: credential.id, credential_type: meta.type },
+      {
+        onSuccess() {
+          handleClose();
+          toast({
+            title: "Credential successfully removed",
+            description: "Credential has been successfully removed",
+            position: "bottom-right",
+            status: "success",
+          });
+        },
+        onError() {
+          toast({
+            title: "Error while deleting credential",
+            description: "An unexpected error. Please try again.",
+            duration: 3000,
+            position: "bottom-right",
+            status: "error",
+          });
+        },
+      },
+    );
+  };
+
+  if (!credential) return null;
+
+  const [currentToRevoke] = state;
+  const { granteeAddress } = currentToRevoke ?? {};
+
+  const meta = JSON.parse(credential.public_notes);
+
   return (
-    <Modal
-      isOpen={props.isOpen}
-      onClose={props.onClose}
+    <AlertDialog
+      isOpen={isOpen}
       size={{
         base: "full",
-        md: "md"
+        lg: "lg",
       }}
+      isCentered
+      leastDestructiveRef={cancelRef}
+      onClose={handleClose}
     >
-      <ModalOverlay />
-      <ModalContent gap={5}>
-        <ModalHeader mt={2}>
-          <Heading fontSize="2xl" fontWeight="medium" textAlign="center">
-            Delete Credential
-          </Heading>
-        </ModalHeader>
-        <ModalCloseButton />
-        <ModalBody>
-          <Flex direction="column" gap={10}>
-            <Text>Do you want to delete this credential?</Text>
-            <Flex
-              align="center"
-              gap={14}
-              p={8}
-              bg="neutral.800"
-              border="1px solid"
-              borderColor="neutral.600"
-              rounded="xl"
-            >
-              <Box>
-                <KeyRoundIcon w={26} h={26} stroke="neutral.100" />
-              </Box>
-              <VStack align="start" gap={2}>
-                <Heading color="neutral.600" fontWeight="medium" size="sm">
-                  Type
-                </Heading>
-                <Text>{props.credential.credential_type}</Text>
-              </VStack>
-              <VStack align="start" gap={4}>
-                <Heading color="neutral.600" fontWeight="medium" size="sm">
-                  Issuer
-                </Heading>
-                <Text>{props.credential.issuer}</Text>
-              </VStack>
-            </Flex>
-          </Flex>
-        </ModalBody>
-        <ModalFooter
-          alignItems="center"
-          justifyContent="space-between"
-          gap={10}
-        >
-          <Button onClick={props.onClose} variant="outline">
-            Cancel
-          </Button>
+      <AlertDialogOverlay>
+        <AlertDialogContent bg="neutral.900" rounded="xl">
+          <AlertDialogHeader>
+            {revokeGrants.isPending
+              ? "Revoking grants"
+              : deleteCredential.isPending
+                ? "Deleting credential"
+                : "Delete credential"}
+          </AlertDialogHeader>
+          <AlertDialogCloseButton />
+          <AlertDialogBody>
+            {revokeGrants.isPending ? (
+              <>
+                <Text mb={1}>Revoking grant for grantee:</Text>
+                <Code px={2} py={1} rounded="md" fontSize="sm" bg="neutral.800">
+                  {granteeAddress}
+                </Code>
+              </>
+            ) : deleteCredential.isPending ? (
+              <Text>
+                Deleting credential of type{" "}
+                <Text as="span" color="green.200" fontWeight="semibold">
+                  {meta.type}
+                </Text>{" "}
+                from issuer{" "}
+                <Text as="span" color="green.200" fontWeight="semibold">
+                  {meta.issuer}
+                </Text>
+              </Text>
+            ) : (
+              <Text>Do you want to delete this credential from the idOS?</Text>
+            )}
+          </AlertDialogBody>
+          <AlertDialogFooter>
+            {!(revokeGrants.isPending || deleteCredential.isPending) ? (
+              <Button ref={cancelRef} onClick={handleClose}>
+                Cancel
+              </Button>
+            ) : null}
 
-          <Button
-            colorScheme="green"
-            isLoading={deleteCredential.isPending}
-            onClick={handleDelete}
-          >
-            Delete
-          </Button>
-        </ModalFooter>
-      </ModalContent>
-    </Modal>
+            <Button
+              id={`confirm-delete-credential-${credential.id}`}
+              colorScheme="red"
+              ml={3}
+              onClick={handleDeleteCredential}
+              isLoading={revokeGrants.isPending || deleteCredential.isPending}
+            >
+              {deleteCredential.isError ? "Retry" : "Delete"}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialogOverlay>
+    </AlertDialog>
   );
 };

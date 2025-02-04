@@ -1,72 +1,104 @@
-import i18n from "#/lib/i18n";
-import { theme } from "#/lib/theme";
-import { ChakraProvider } from "@chakra-ui/react";
+import { ChakraBaseProvider } from "@chakra-ui/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { ReactQueryDevtools } from "@tanstack/react-query-devtools";
-import { BrowserProvider, Eip1193Provider } from "ethers";
-import { MetaMaskProvider } from "metamask-react";
+import { createWeb3Modal } from "@web3modal/wagmi/react";
 import React from "react";
 import ReactDOM from "react-dom/client";
-import { I18nextProvider } from "react-i18next";
-import {
-  Navigate,
-  RouterProvider,
-  createBrowserRouter
-} from "react-router-dom";
+import { Navigate, Outlet, RouterProvider, createBrowserRouter } from "react-router-dom";
+import { WagmiProvider } from "wagmi";
 
-import App from "./app";
-
-declare global {
-  interface Window {
-    ethereum: BrowserProvider & Eip1193Provider;
-  }
-}
+import App from "@/app";
+import { Provider as IDOSProvider } from "@/core/idos";
+import { WalletSelectorContextProvider } from "@/core/near";
+import { projectId, wagmiConfig } from "@/core/wagmi";
+import { theme } from "@/theme";
 
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
-      retry: 0
-    }
-  }
+      retry: 0,
+      refetchOnWindowFocus: false,
+      staleTime: Number.POSITIVE_INFINITY,
+    },
+  },
 });
+
+createWeb3Modal({ wagmiConfig, projectId });
 
 ReactDOM.createRoot(document.getElementById("root") as HTMLElement).render(
   <React.StrictMode>
-    <I18nextProvider i18n={i18n}>
-      <ChakraProvider theme={theme}>
-        <QueryClientProvider client={queryClient}>
-          <MetaMaskProvider>
-            <RouterProvider
-              router={createBrowserRouter([
-                {
-                  path: "/",
-                  element: <App />,
-                  children: [
-                    {
-                      lazy: () => import("#/routes/dashboard"),
-                      children: [
-                        {
-                          index: true,
-                          lazy: () => import("#/routes/dashboard/credentials")
-                        },
-                        {
-                          path: "/wallets",
-                          lazy: () => import("#/routes/dashboard/wallets")
-                        },
-                        {
-                          path: "/success",
-                          element: <Navigate to="/" />
-                        }
-                      ]
-                    }
-                  ]
-                }
-              ])}
-            />
-            <ReactQueryDevtools />
-          </MetaMaskProvider>
-        </QueryClientProvider>
-      </ChakraProvider>
-    </I18nextProvider>
-  </React.StrictMode>
+    <ChakraBaseProvider theme={theme}>
+      <WalletSelectorContextProvider>
+        {/* @ts-ignore: TODO: fix wagmi types */}
+        <WagmiProvider config={wagmiConfig}>
+          <QueryClientProvider client={queryClient}>
+            <IDOSProvider>
+              <RouterProvider
+                router={createBrowserRouter([
+                  {
+                    path: "/",
+                    element: <App />,
+                    children: [
+                      {
+                        lazy: () => import("@/routes/dashboard"),
+                        children: [
+                          {
+                            index: true,
+                            lazy: () => import("@/routes/dashboard/credentials"),
+                            handle: {
+                              crumb: () => "Credentials",
+                            },
+                          },
+                          {
+                            path: "/wallets",
+                            lazy: () => import("@/routes/dashboard/wallets"),
+                            handle: {
+                              crumb: () => "Wallets",
+                            },
+                          },
+                          {
+                            path: "/settings",
+                            lazy: () => import("@/routes/dashboard/settings"),
+                            handle: {
+                              crumb: () => "Settings",
+                            },
+                          },
+                          {
+                            path: "/success",
+                            element: <Navigate to="/" />,
+                          },
+                          // temporary route setup for testing purposes of the SDK.
+                          {
+                            path: "/e2e",
+                            element: <Outlet />,
+                            children: [
+                              {
+                                path: "credential-filtering-by-country",
+                                lazy: () =>
+                                  import(
+                                    "@/routes/dashboard/e2e/credential-filtering/credential-filtering-by-country"
+                                  ),
+                              },
+                              {
+                                path: "credential-filtering",
+                                lazy: () =>
+                                  import(
+                                    "@/routes/dashboard/e2e/credential-filtering/credential-filtering"
+                                  ),
+                              },
+                            ],
+                          },
+                        ],
+                      },
+                    ],
+                  },
+                ])}
+              />
+            </IDOSProvider>
+            <ReactQueryDevtools buttonPosition="bottom-left" />
+          </QueryClientProvider>
+        </WagmiProvider>
+      </WalletSelectorContextProvider>
+    </ChakraBaseProvider>
+  </React.StrictMode>,
 );

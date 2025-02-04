@@ -5,14 +5,16 @@
     "clean": "turbo run clean && rm -rf node_modules",
     "dev": "turbo run dev",
     "lint": "turbo run lint",
-    "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format": "turbo run format",
+    "format:check": "biome ci --formatter-enabled=true --linter-enabled=false .",
+    "test": "turbo run test",
+    "postinstall": "lefthook install"
   },
   "devDependencies": {
-    "eslint": "^8.52.0",
-    "prettier": "^3.0.3",
-    "turbo": "latest"
+    "@biomejs/biome": "1.9.4",
+    "lefthook": "1.7.5",
+    "turbo": "^2.3.3"
   },
-  "packageManager": "pnpm@8.6.10",
-  "name": "idos-sdk-js"
+  "name": "idos-sdk-js",
+  "packageManager": "pnpm@9.6.0"
 }

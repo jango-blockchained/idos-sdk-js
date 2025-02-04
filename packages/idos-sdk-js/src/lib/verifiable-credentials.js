@@ -3,62 +3,33 @@ import { Ed25519VerificationKey2020 } from "@digitalbazaar/ed25519-verification-
 import * as vc from "@digitalbazaar/vc";
 import * as jsonld from "jsonld";
 import { JsonLdDocumentLoader } from "jsonld-document-loader";
+import { cachedIssuers } from "./cachedIssuers";
+import { cachedSchemas } from "./cachedSchemas";
 
-const FRACTAL_ISSUER = "https://vc-issuers.fractal.id/idos";
-const FRACTAL_PUBLIC_KEY_MULTIBASE = import.meta.env.VITE_FRACTAL_ID_ISSUER_CREDENTIAL_PUBLIC_KEY_MULTIBASE;
+export const FRACTAL_ISSUER = "https://vc-issuers.fractal.id/idos";
+export const STAGING_FRACTAL_ISSUER = "https://vc-issuers.staging.sandbox.fractal.id/idos";
+export const PLAYGROUND_FRACTAL_ISSUER = "https://vc-issuers.next.fractal.id/idos";
 
-const issuerDoc = (id, publicKeyMultibase) => ({
-  "@context": [
-    "https://w3id.org/security/suites/ed25519-2020/v1",
-    {
-      assertionMethod: {
-        "@id": "https://w3id.org/security#assertionMethod",
-        "@type": "@id",
-        "@container": "@set",
-      },
-    },
-  ],
-  id,
-  assertionMethod: [
-    {
-      id: `${id}#${publicKeyMultibase}`,
-      type: "Ed25519VerificationKey2020",
-      controller: id,
-      publicKeyMultibase,
-    },
-  ],
-});
-
-const staticLoader = (() => {
+export const defaultLoader = (() => {
   const loader = new JsonLdDocumentLoader();
-  loader.addStatic(FRACTAL_ISSUER, issuerDoc(FRACTAL_ISSUER, FRACTAL_PUBLIC_KEY_MULTIBASE));
+  for (const [url, doc] of [...Object.entries(cachedSchemas), ...Object.entries(cachedIssuers)]) {
+    loader.addStatic(url, doc);
+  }
   return loader.build();
 })();
 
-const xhrLoader = (jsonld.documentLoaders.xhr ?? jsonld.documentLoaders.node)();
-
-export const documentLoaderWithStaticFractal =
-  (documentLoader) =>
-  async (url, options = {}) => {
-    try {
-      return await staticLoader(url, options);
-    } catch (e) {
-      // Ignored on purpose.
-    }
-
-    return await documentLoader(url, options);
-  };
-
 const knownSignatureBuilders = {
-  Ed25519VerificationKey2020: async (m) =>
+  Ed25519VerificationKey2020: async (method) =>
     new Ed25519Signature2020({
-      key: await Ed25519VerificationKey2020.from(m),
+      key: await Ed25519VerificationKey2020.from(method),
     }),
 };
 
 const buildSignatures = async (methods, signatureBuilders) => {
   const result = (
-    await Promise.all(methods.map(async (method) => await signatureBuilders[method.type]?.call(null, method)))
+    await Promise.all(
+      methods.map(async (method) => await signatureBuilders[method.type]?.call(null, method)),
+    )
   ).filter((o) => !!o);
 
   if (!result.length) throw new Error("Didn't find any supported keys.");
@@ -84,13 +55,11 @@ const buildSignatures = async (methods, signatureBuilders) => {
  *
  * @returns {true} `true` on success. Otherwise, throws an Error describing the problem.
  */
-const verify = async (credential, options = {}) => {
+export const verify = async (credential, options = {}) => {
   let { allowedSigners, allowedIssuers, signatureBuilders, documentLoader } = options;
   if (!signatureBuilders) signatureBuilders = knownSignatureBuilders;
   if (!allowedIssuers) allowedIssuers = [FRACTAL_ISSUER];
-  if (!documentLoader) documentLoader = xhrLoader;
-
-  documentLoader = documentLoaderWithStaticFractal(documentLoader);
+  if (!documentLoader) documentLoader = defaultLoader;
 
   if (typeof credential === "string" || credential instanceof String) {
     credential = JSON.parse(credential);
@@ -114,12 +83,17 @@ const verify = async (credential, options = {}) => {
       if (!issuerDoc) throw new Error("Couldn't fetch document for the issuer.");
 
       const methods = issuerDoc[proofPurpose];
-      if (!methods || !methods.length) throw new Error(`Empty or absent "${proofPurpose}" in issuer.`);
+      if (!methods || !methods.length)
+        throw new Error(`Empty or absent "${proofPurpose}" in issuer.`);
 
       return buildSignatures(methods, signatureBuilders);
     })());
 
-  const result = await vc.verifyCredential({ credential, suite, documentLoader });
+  const result = await vc.verifyCredential({
+    credential,
+    suite,
+    documentLoader,
+  });
 
   if (!result.verified) throw result?.results?.[0]?.error || result;
 

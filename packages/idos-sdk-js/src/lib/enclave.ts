@@ -1,92 +1,74 @@
-import * as Base64Codec from "@stablelib/base64";
-import * as Utf8Codec from "@stablelib/utf8";
-import { idOS } from ".";
-import { assertNever } from "../types";
-import { IframeEnclave, MetaMaskSnapEnclave } from "./enclave-providers";
-import { EnclaveProvider } from "./enclave-providers/enclave-provider";
-
-const ENCLAVE_PROVIDERS = {
-  iframe: IframeEnclave,
-  "metamask-snap": MetaMaskSnapEnclave,
-} as const;
-
-type ProviderType = keyof typeof ENCLAVE_PROVIDERS;
+import { base64Decode, base64Encode, utf8Decode, utf8Encode } from "@idos-network/codecs";
+import type { idOSCredential } from "@idos-network/idos-sdk-types";
+import type { Auth } from "./auth";
+import type { EnclaveProvider } from "./enclave-providers/types";
+import type { BackupPasswordInfo } from "./types";
 
 export class Enclave {
-  idOS: idOS;
-  initialized: boolean;
-  provider: EnclaveProvider;
-  encryptionPublicKey?: Uint8Array;
+  userEncryptionPublicKey?: Uint8Array;
 
-  constructor(idOS: idOS, container: string, providerType: ProviderType = "iframe", usePasskeys = false) {
-    this.initialized = false;
-    this.idOS = idOS;
-
-    switch (providerType) {
-      case "iframe":
-        this.provider = new IframeEnclave({ container, usePasskeys });
-        break;
-      case "metamask-snap":
-        this.provider = new MetaMaskSnapEnclave({});
-        break;
-      default:
-        this.provider = assertNever(providerType, `Unexpected provider type: ${providerType}`);
-    }
-  }
+  constructor(
+    public readonly auth: Auth,
+    public readonly provider: EnclaveProvider,
+  ) {}
 
   async load() {
-    const { encryptionPublicKey, humanId, signerAddress, signerPublicKey } = await this.provider.load();
-
-    this.idOS.store.set("encryption-public-key", encryptionPublicKey);
-    this.idOS.store.set("human-id", humanId);
-    this.idOS.store.set("signer-address", signerAddress);
-    this.idOS.store.set("signer-public-key", signerPublicKey);
+    await this.provider.load();
   }
 
-  async init(humanId?: string): Promise<Uint8Array> {
-    const signerAddress = this.idOS.store.get("signer-address");
-    const signerPublicKey = this.idOS.store.get("signer-public-key");
+  async ready(): Promise<Uint8Array> {
+    const { userId, userAddress, nearWalletPublicKey, currentUserPublicKey } =
+      this.auth.currentUser;
 
-    humanId ||= (await this.idOS.auth.currentUser()).humanId;
+    if (!userId) throw new Error("Can't operate on a user that has no profile.");
 
-    if (!humanId) throw new Error("Could not initialize user.");
+    const litAttrs = await this.auth.kwilWrapper.getLitAttrs();
+    const userWallets = await this.auth.kwilWrapper.getEvmUserWallets();
 
-    this.encryptionPublicKey = await this.provider.init(humanId, signerAddress, signerPublicKey);
-    this.idOS.store.set("encryption-public-key", this.encryptionPublicKey);
-    this.initialized = true;
+    await this.provider.updateStore("litAttrs", litAttrs);
+    await this.provider.updateStore("new-user-wallets", userWallets);
 
-    return this.encryptionPublicKey;
-  }
+    if (this.userEncryptionPublicKey) return this.userEncryptionPublicKey;
 
-  store(key: string, value: any) {
-    const transportKey = {
-      "human-id": "humanId",
-      "signer-address": "signerAddress",
-      "signer-public-key": "signerPublicKey",
-    }[key]!;
-
-    return this.provider.store(transportKey, value);
-  }
-
-  async encrypt(message: string, receiverPublicKey?: string): Promise<string> {
-    if (!this.initialized) await this.init();
-
-    return Base64Codec.encode(
-      await this.provider.encrypt(
-        Utf8Codec.encode(message),
-        receiverPublicKey === undefined ? undefined : Base64Codec.decode(receiverPublicKey)
-      )
+    this.userEncryptionPublicKey = await this.provider.ready(
+      userId,
+      userAddress,
+      nearWalletPublicKey,
+      currentUserPublicKey,
     );
+
+    return this.userEncryptionPublicKey;
   }
 
-  async decrypt(message: string, senderPublicKey?: string): Promise<string> {
-    if (!this.initialized) await this.init();
+  async encrypt(
+    message: string,
+    recipientEncryptionPublicKey?: string,
+  ): Promise<{ content: string; encryptorPublicKey: string }> {
+    if (!this.userEncryptionPublicKey) await this.ready();
 
-    return Utf8Codec.decode(
+    const { content, encryptorPublicKey } = await this.provider.encrypt(
+      utf8Encode(message),
+      recipientEncryptionPublicKey === undefined
+        ? undefined
+        : base64Decode(recipientEncryptionPublicKey),
+    );
+
+    return {
+      content: base64Encode(content),
+      encryptorPublicKey: base64Encode(encryptorPublicKey),
+    };
+  }
+
+  async decrypt(message: string, senderEncryptionPublicKey?: string): Promise<string> {
+    if (!this.userEncryptionPublicKey) await this.ready();
+
+    return utf8Decode(
       await this.provider.decrypt(
-        Base64Codec.decode(message),
-        senderPublicKey === undefined ? undefined : Base64Codec.decode(senderPublicKey)
-      )
+        base64Decode(message),
+        senderEncryptionPublicKey === undefined
+          ? undefined
+          : base64Decode(senderEncryptionPublicKey),
+      ),
     );
   }
 
@@ -96,5 +78,35 @@ export class Enclave {
 
   async reset() {
     return this.provider.reset();
+  }
+
+  async updateStore(key: string, value: unknown) {
+    this.provider.updateStore(key, value);
+  }
+
+  async filterCredentialsByCountries(credentials: Record<string, string>[], countries: string[]) {
+    if (!this.userEncryptionPublicKey) await this.ready();
+    return await this.provider.filterCredentialsByCountries(credentials, countries);
+  }
+
+  async filterCredentials(
+    credentials: Record<string, string>[],
+    privateFieldFilters: {
+      pick: Record<string, string>;
+      omit: Record<string, string>;
+    },
+  ): Promise<idOSCredential[]> {
+    if (!this.userEncryptionPublicKey) await this.ready();
+    return await this.provider.filterCredentials(credentials, privateFieldFilters);
+  }
+
+  async backupPasswordOrSecret(callbackFn: (response: BackupPasswordInfo) => Promise<void>) {
+    await this.ready();
+
+    return this.provider.backupPasswordOrSecret(callbackFn);
+  }
+
+  async discoverUserEncryptionPublicKey(userId: string) {
+    return this.provider.discoverUserEncryptionPublicKey(userId);
   }
 }

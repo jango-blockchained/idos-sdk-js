@@ -1,57 +1,88 @@
+import {
+  base64Decode,
+  binaryWriteUint16BE,
+  borshSerialize,
+  bytesConcat,
+  utf8Decode,
+} from "@idos-network/codecs";
+import type { EthSigner } from "@kwilteam/kwil-js/dist/core/builders";
 import type { SignMessageParams, SignedMessage, Wallet } from "@near-wallet-selector/core";
-import * as Base64Codec from "@stablelib/base64";
-import * as BinaryCodec from "@stablelib/binary";
-import * as BytesCodec from "@stablelib/bytes";
-import * as Utf8Codec from "@stablelib/utf8";
-import * as BorshCodec from "borsh";
 import type { Signer } from "ethers";
-import { SigningKey, hashMessage } from "ethers";
-import { idOS } from "./idos";
-import { Nonce } from "./nonce";
 
-/* global Buffer */
+import type { Store } from "../../../idos-store";
+import type { KwilWrapper } from "./kwil-wrapper";
+import { Nonce } from "./nonce";
+import { implicitAddressFromPublicKey } from "./utils";
 
 export interface AuthUser {
-  humanId?: string;
-  address?: string;
-  publicKey?: string;
+  userId: string | null;
+  userAddress: string;
+  /**
+   * The public key of the wallet that was used to sign the message.
+   * It's only available when the `signer` is a NEAR wallet.
+   */
+  nearWalletPublicKey?: string;
+  /**
+   * The derived public key of the user from the password / passkey.
+   */
+  currentUserPublicKey?: string;
+}
+
+export class NoProfile extends Error {
+  constructor() {
+    super("Signer's address is not known to idOS.");
+  }
 }
 
 export class Auth {
-  idOS: idOS;
-  user: AuthUser;
+  private user?: AuthUser;
 
-  constructor(idOS: idOS) {
-    this.idOS = idOS;
-    this.user = {};
+  get currentUser() {
+    if (!this.user) throw new Error("Call idOS.setSigner first.");
+    return this.user;
   }
 
-  async forget() {
-    this.idOS.store.reset();
-    await this.idOS.enclave.reset();
+  constructor(
+    public readonly kwilWrapper: KwilWrapper,
+    public readonly store: Store,
+  ) {}
+
+  forget() {
+    this.store.reset();
   }
 
-  async remember(key: string, value: any) {
-    this.idOS.store.set(key, value);
-    await this.idOS.enclave.store(key, value);
+  remember(key: string, value: unknown) {
+    this.store.set(key, value);
   }
 
   async setEvmSigner(signer: Signer) {
-    const storedAddress = this.idOS.store.get("signer-address");
     const currentAddress = await signer.getAddress();
 
-    let publicKey = this.idOS.store.get("signer-public-key");
+    if (!(await this.kwilWrapper.hasProfile(currentAddress))) throw new NoProfile();
 
-    if (storedAddress != currentAddress || !publicKey || !this.idOS.store.get("human-id")) {
-      await this.forget();
-      const message = "idOS authentication";
-      publicKey = SigningKey.recoverPublicKey(hashMessage(message), await signer.signMessage(message));
+    const storedAddress = this.store.get("signer-address");
+
+    if (storedAddress !== currentAddress) {
+      // To avoid re-using the old signer's kgw cookie.
+      // When kwil-js supports multi cookies, we can remove this.
+      await this.kwilWrapper.client.auth.logout();
+
+      this.remember("signer-address", currentAddress);
     }
 
-    await this.remember("signer-address", currentAddress);
-    await this.remember("signer-public-key", publicKey);
+    this.kwilWrapper.setSigner({
+      accountId: currentAddress,
+      signer: signer as EthSigner,
+      signatureType: "secp256k1_ep",
+    });
 
-    return this.#setSigner({ signer, publicKey, signatureType: "secp256k1_ep" });
+    const { recipient_encryption_public_key, id } = await this.kwilWrapper.getUserProfile();
+
+    this.user = {
+      userId: id,
+      currentUserPublicKey: recipient_encryption_public_key,
+      userAddress: currentAddress,
+    };
   }
 
   async setNearSigner(wallet: Wallet, recipient = "idos.network") {
@@ -59,14 +90,16 @@ export class Auth {
 
     const currentAddress = (await wallet.getAccounts())[0].accountId;
 
+    if (!(await this.kwilWrapper.hasProfile(currentAddress))) throw new NoProfile();
+
     if (wallet.id === "my-near-wallet") {
       const { accountId, signature, publicKey, error } = Object.fromEntries(
-        new URLSearchParams(window.location.hash.slice(1)).entries()
+        new URLSearchParams(window.location.hash.slice(1)).entries(),
       );
 
       if (signature) {
-        await this.remember("signer-address", accountId);
-        await this.remember("signer-public-key", publicKey);
+        this.remember("signer-address", accountId);
+        this.remember("signer-public-key", publicKey);
       }
 
       const signMessageOriginal = wallet.signMessage.bind(wallet);
@@ -77,10 +110,10 @@ export class Auth {
       }: SignMessageParams): Promise<SignedMessage & { nonce?: Uint8Array }> => {
         if (error) return Promise.reject();
 
-        const lastMessage = this.idOS.store.get("sign-last-message");
+        const lastMessage = this.store.get("sign-last-message");
         if (signature && message === lastMessage) {
-          const nonce = Buffer.from(this.idOS.store.get("sign-last-nonce"));
-          const callbackUrl = this.idOS.store.get("sign-last-url");
+          const nonce = Buffer.from(this.store.get("sign-last-nonce"));
+          const callbackUrl = this.store.get("sign-last-url");
 
           return Promise.resolve({
             accountId: currentAddress,
@@ -89,49 +122,58 @@ export class Auth {
             nonce,
             message,
             callbackUrl,
-          });
-        } else {
-          const callbackUrl = window.location.href;
-          const nonce = Buffer.from(new Nonce(32).clampUTF8);
-
-          this.idOS.store.set("sign-last-message", message);
-          this.idOS.store.set("sign-last-nonce", Array.from(nonce));
-          this.idOS.store.set("sign-last-url", callbackUrl);
-
-          signMessageOriginal({ message, nonce, recipient, callbackUrl });
-
-          return new Promise(() => ({}) as SignedMessage);
+          } as SignedMessage);
         }
+        const callbackUrl = window.location.href;
+        const nonce = Buffer.from(new Nonce(32).clampUTF8);
+
+        this.store.set("sign-last-message", message);
+        this.store.set("sign-last-nonce", Array.from(nonce));
+        this.store.set("sign-last-url", callbackUrl);
+
+        signMessageOriginal({ message, nonce, recipient, callbackUrl });
+
+        return new Promise(() => ({}) as SignedMessage);
       };
     }
 
-    const storedAddress = this.idOS.store.get("signer-address");
+    const storedAddress = this.store.get("signer-address");
 
-    let publicKey = this.idOS.store.get("signer-public-key");
+    let publicKey = this.store.get("signer-public-key");
 
-    if (storedAddress != currentAddress || !publicKey) {
-      await this.forget();
+    if (storedAddress !== currentAddress || !publicKey) {
+      this.forget();
+      // To avoid re-using the old signer's kgw cookie.
+      // When kwil-js supports multi cookies, we can remove this.
+      await this.kwilWrapper.client.auth.logout();
 
       const message = "idOS authentication";
       const nonce = Buffer.from(new Nonce(32).bytes);
+      // biome-ignore lint/style/noNonNullAssertion: Only non-signing wallets return void.
       ({ publicKey } = (await wallet.signMessage({ message, recipient, nonce }))!);
 
-      await this.remember("signer-address", currentAddress);
-      await this.remember("signer-public-key", publicKey);
+      this.remember("signer-address", currentAddress);
+      this.remember("signer-public-key", publicKey);
     }
 
     const signer = async (message: string | Uint8Array): Promise<Uint8Array> => {
-      if (typeof message !== "string") message = Utf8Codec.decode(message);
+      // biome-ignore lint/style/noParameterAssign: we're narrowing the type on purpose.
+      if (typeof message !== "string") message = utf8Decode(message);
       if (!wallet.signMessage) throw new Error("Only wallets with signMessage are supported.");
 
-      let nonceSuggestion = Buffer.from(new Nonce(32).bytes);
+      const nonceSuggestion = Buffer.from(new Nonce(32).bytes);
 
       const {
         nonce = nonceSuggestion,
         signature,
         // @ts-ignore Signatures don't seem to be updated for NEP413 yet.
         callbackUrl,
-      } = (await (wallet.signMessage as (_: SignMessageParams) => Promise<SignedMessage & { nonce?: Uint8Array }>)({
+        // biome-ignore lint/style/noNonNullAssertion: Only non-signing wallets return void.
+      } = (await (
+        wallet.signMessage as (
+          _: SignMessageParams,
+        ) => Promise<SignedMessage & { nonce?: Uint8Array }>
+      )({
         message,
         recipient,
         nonce: nonceSuggestion,
@@ -155,54 +197,28 @@ export class Auth {
         callbackUrl,
       };
 
-      const nep413BorshPayload = BorshCodec.serialize(nep413BorschSchema, nep413BorshParams);
+      const nep413BorshPayload = borshSerialize(nep413BorschSchema, nep413BorshParams);
 
-      return BytesCodec.concat(
-        BinaryCodec.writeUint16BE(nep413BorshPayload.length),
+      return bytesConcat(
+        binaryWriteUint16BE(nep413BorshPayload.length),
         nep413BorshPayload,
-        Base64Codec.decode(signature)
+        base64Decode(signature),
       );
     };
 
-    return this.#setSigner({
-      accountId: currentAddress,
+    this.kwilWrapper.setSigner({
+      accountId: implicitAddressFromPublicKey(publicKey),
       signer,
-      publicKey,
       signatureType: "nep413",
     });
-  }
 
-  #setSigner<
-    T extends {
-      signer: Signer | ((message: Uint8Array) => Promise<Uint8Array>);
-      publicKey: string;
-      signatureType: string;
-    },
-  >(args: T) {
-    this.idOS.kwilWrapper.setSigner(args);
-    return args;
-  }
+    const { recipient_encryption_public_key, id } = await this.kwilWrapper.getUserProfile();
 
-  async setHumanId(humanId: string) {
-    if (!humanId) return;
-
-    this.user.humanId = humanId;
-    await this.remember("human-id", humanId);
-  }
-
-  async currentUser() {
-    if (this.user.humanId === undefined) {
-      const currentUserKeys = ["human-id", "signer-address", "signer-public-key"];
-      let [humanId, address, publicKey] = currentUserKeys.map(this.idOS.store.get.bind(this.idOS.store)) as Array<
-        string | undefined
-      >;
-
-      humanId = humanId || (await this.idOS.kwilWrapper.getHumanId()) || undefined;
-
-      this.user = { humanId, address, publicKey };
-      this.idOS.store.set("human-id", humanId);
-    }
-
-    return this.user;
+    this.user = {
+      userId: id,
+      currentUserPublicKey: recipient_encryption_public_key,
+      userAddress: currentAddress,
+      nearWalletPublicKey: publicKey,
+    };
   }
 }
